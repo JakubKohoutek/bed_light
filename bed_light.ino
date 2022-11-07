@@ -5,8 +5,15 @@
 
 #include <credentials.h>
 
+#define LED_PIN  D6
+#define PIR_PIN D7
+
 const char* ssid = STASSID;
 const char* password = STAPSK;
+
+int currentBrightness = 0;
+int maximumBrightness = 1023;
+
 
 void setup() {
   Serial.begin(115200);
@@ -68,19 +75,39 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  pinMode(D4, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(PIR_PIN, INPUT);
+}
+
+void fadeIn() {
+  while (currentBrightness < maximumBrightness) {
+    analogWrite(LED_PIN, ++currentBrightness);
+    delay(1);
+  };
+}
+
+void fadeOut() {
+  while (currentBrightness > 0) {
+    analogWrite(LED_PIN, --currentBrightness);
+    delay(1);
+  };
 }
 
 void loop() {
   ArduinoOTA.handle();
-  digitalWrite(D4, HIGH);
-  int interval = 2048;
-  int intervalProgress = millis() % interval;
-  int modificationCoefficient = interval / 2 / 255;
-  analogWrite(
-    D4,
-    intervalProgress > interval/2 
-      ? (interval - intervalProgress) / modificationCoefficient
-      : intervalProgress / modificationCoefficient
-  );
+  if (digitalRead(PIR_PIN) == HIGH) {
+    fadeIn();
+  } else {
+    fadeOut();
+  }
+    
+  // int interval = 2048;
+  // int intervalProgress = millis() % interval;
+  // int modificationCoefficient = interval / 2 / 255;
+  // analogWrite(
+  //   LED_PIN,
+  //   intervalProgress > interval/2 
+  //     ? (interval - intervalProgress) / modificationCoefficient
+  //     : intervalProgress / modificationCoefficient
+  // );
 }
