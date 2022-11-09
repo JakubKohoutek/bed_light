@@ -14,7 +14,7 @@ const char* password              = STAPSK;
 const char* deviceId              = "Jacob's bed light";
 State       currentState          = steady;
 int         currentBrightness     = 0;
-int         maximumBrightness     = 1023;
+int         maximumBrightness     = 255;
 int         timeOfLastProcessing  = millis();
 bool        controlledByAssistant = false;
 
@@ -48,8 +48,7 @@ void setup() {
       "[MAIN] Device #%d (%s) state: %s value: %d\n",
       device_id, device_name, switchedOn ? "ON" : "OFF", value
     );
-    // Alexa will return brightness from 0 to 255, we need to transform it to 0 - 1023
-    maximumBrightness = min(value * 4, 1023); 
+    maximumBrightness = value; 
     controlledByAssistant = switchedOn;
     if (switchedOn) {
       currentState = fadingIn;
@@ -61,7 +60,7 @@ void setup() {
 
 void handleLightChangeEvents () {
   int currentTime = millis();
-  if (currentTime - timeOfLastProcessing < 1) {
+  if (currentTime - timeOfLastProcessing < 2) {
     return;
   }
   timeOfLastProcessing = currentTime;
@@ -97,15 +96,15 @@ void loop() {
   OTA::handle();
   handleLightChangeEvents();
 
-  // Handle PIR sensor readings only if not controlled remotely
-  if (controlledByAssistant)
-    return;
-
   if (digitalRead(PIR_PIN) == HIGH) {
     digitalWrite(LED_BUILTIN, LOW);
-    currentState = fadingIn;
+    if (!controlledByAssistant) {
+      currentState = fadingIn;
+    }
   } else {
     digitalWrite(LED_BUILTIN, HIGH);
-    currentState = fadingOut;
+    if (!controlledByAssistant) {
+      currentState = fadingOut;
+    }
   }
 }
