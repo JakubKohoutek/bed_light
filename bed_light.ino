@@ -2,6 +2,7 @@
 #include <fauxmoESP.h>
 #include <credentials.h>
 #include "ota.h"
+#include "memory.h"
 
 #define LED_PIN D6
 #define PIR_PIN D7
@@ -9,14 +10,15 @@
 enum State { steady, fadingIn, fadingOut };
 
 fauxmoESP   fauxmo;
-const char* ssid                  = STASSID;
-const char* password              = STAPSK;
-const char* deviceId              = "Jacob's bed light";
-State       currentState          = steady;
-int         currentBrightness     = 0;
-int         maximumBrightness     = 255;
-int         timeOfLastProcessing  = millis();
-bool        controlledByAssistant = false;
+const char* ssid                    = STASSID;
+const char* password                = STAPSK;
+const char* deviceId                = "Jacob's bed light";
+State       currentState            = steady;
+int         currentBrightness       = 0;
+int         brightnessMemoryAddress = 0;
+int         maximumBrightness       = 255;
+int         timeOfLastProcessing    = millis();
+bool        controlledByAssistant   = false;
 
 void setup() {
   pinMode(LED_PIN,     OUTPUT);
@@ -34,6 +36,11 @@ void setup() {
     ESP.restart();
   }
 
+  // Inititate eeprom memory
+  initiateMemory();
+  //  writeToMemory(brightnessMemoryAddress, 0); // erase memory, only on the first upload
+  maximumBrightness = readFromMemory(brightnessMemoryAddress);
+
   // Initiate over the air programming
   OTA::initialize(deviceId);
 
@@ -48,7 +55,8 @@ void setup() {
       "[MAIN] Device #%d (%s) state: %s value: %d\n",
       device_id, device_name, switchedOn ? "ON" : "OFF", value
     );
-    maximumBrightness = value; 
+    maximumBrightness = value;
+    writeToMemory(brightnessMemoryAddress, value);
     controlledByAssistant = switchedOn;
     if (switchedOn) {
       currentState = fadingIn;
