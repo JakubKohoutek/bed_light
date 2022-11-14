@@ -6,6 +6,7 @@
 
 #define LED_PIN D6
 #define PIR_PIN D7
+#define LDR_PIN A0
 
 enum State { steady, fadingIn, fadingOut };
 
@@ -14,9 +15,10 @@ const char* ssid                    = STASSID;
 const char* password                = STAPSK;
 const char* deviceId                = "Jacob's bed light";
 State       currentState            = steady;
-int         currentBrightness       = 0;
+int         ledStripBrightness      = 0;
 int         brightnessMemoryAddress = 0;
 int         maximumBrightness       = 255;
+int         roomBrightnessThreshold = 500;
 int         timeOfLastProcessing    = millis();
 bool        controlledByAssistant   = false;
 
@@ -75,21 +77,21 @@ void handleLightChangeEvents () {
   
   switch (currentState) {
     case steady:
-      analogWrite(LED_PIN, currentBrightness);
+      analogWrite(LED_PIN, ledStripBrightness);
       break;
     case fadingIn:
-      if (currentBrightness < maximumBrightness) {
-        analogWrite(LED_PIN, ++currentBrightness);
+      if (ledStripBrightness < maximumBrightness) {
+        analogWrite(LED_PIN, ++ledStripBrightness);
       } else 
-      if (currentBrightness > maximumBrightness) {
-        analogWrite(LED_PIN, --currentBrightness);
+      if (ledStripBrightness > maximumBrightness) {
+        analogWrite(LED_PIN, --ledStripBrightness);
       } else {
         currentState = steady;
       }
       break;
     case fadingOut:
-      if (currentBrightness > 0) {
-        analogWrite(LED_PIN, --currentBrightness);
+      if (ledStripBrightness > 0) {
+        analogWrite(LED_PIN, --ledStripBrightness);
       } else {
         currentState = steady;
       }
@@ -105,8 +107,10 @@ void loop() {
   handleLightChangeEvents();
 
   if (digitalRead(PIR_PIN) == HIGH) {
+    int roomBrightness = analogRead(LDR_PIN);
+
     digitalWrite(LED_BUILTIN, LOW);
-    if (!controlledByAssistant) {
+    if (!controlledByAssistant && roomBrightness < roomBrightnessThreshold && ledStripBrightness == 0) {
       currentState = fadingIn;
     }
   } else {
