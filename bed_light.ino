@@ -1,5 +1,7 @@
 #include <ESP8266WiFi.h>
+#include <ESPAsyncWebServer.h>
 #include <fauxmoESP.h>
+#include <WebSerial.h>
 #include <credentials.h>
 #include "ota.h"
 #include "memory.h"
@@ -10,53 +12,74 @@
 
 enum State { steady, fadingIn, fadingOut };
 
-fauxmoESP   fauxmo;
-const char* ssid                    = STASSID;
-const char* password                = STAPSK;
-const char* deviceId                = "Jacob's bed light";
-State       currentState            = steady;
-int         ledStripBrightness      = 0;
-int         brightnessMemoryAddress = 0;
-int         maximumBrightness       = 255;
-int         roomBrightnessThreshold = 500;
-int         timeOfLastProcessing    = millis();
-bool        controlledByAssistant   = false;
+fauxmoESP      fauxmo;
+AsyncWebServer server(80);
+const char*    ssid                     = STASSID;
+const char*    password                 = STAPSK;
+const char*    deviceId                 = "Jacob's bed light";
+State          currentState             = steady;
+int            ledStripBrightness       = 0;
+int            brightnessMemoryAddress  = 0;
+int            thresholdMemoryAddress   = 4;
+int            falseAlertsMemoryAddress = 8;
+int            maximumBrightness        = 255;
+int            roomBrightness           = 0;
+int            roomBrightnessThreshold  = 100;
+int            timeOfLastProcessing     = millis();
+int            timeOfLastHeapCheck      = millis();
+int            timeOfLastTrigger        = millis();
+bool           controlledByAssistant    = false;
+int            falsePositivesCount      = 0;
+int            lastFalsePositivesCount  = 0;
+
+void turnOffWiFi() {
+  WiFi.disconnect();
+  WiFi.mode(WIFI_OFF);
+//  WiFi.forceSleepBegin();
+//  delay(1);
+}
+
+void turnOnWiFi() {
+//  WiFi.forceSleepWake();
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED){
+    delay(500);
+  }
+}
 
 void setup() {
   pinMode(LED_PIN,     OUTPUT);
   pinMode(PIR_PIN,     INPUT);
   pinMode(LED_BUILTIN, OUTPUT);
 
-  Serial.begin(115200);
-  Serial.println("\nBooting");
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("Connection Failed! Rebooting...");
-    delay(5000);
-    ESP.restart();
-  }
+  turnOnWiFi();
 
   // Inititate eeprom memory
   initiateMemory();
-  //  writeToMemory(brightnessMemoryAddress, 0); // erase memory, only on the first upload
+
+  // erase memory, only on the first upload
+  // writeToMemory(brightnessMemoryAddress, 0);
+  // writeToMemory(thresholdMemoryAddress, roomBrightnessThreshold);
+
   maximumBrightness = readFromMemory(brightnessMemoryAddress);
+  roomBrightnessThreshold = readFromMemory(thresholdMemoryAddress);
+  lastFalsePositivesCount = readFromMemory(falseAlertsMemoryAddress);
+  writeToMemory(falseAlertsMemoryAddress, 0);
 
   // Initiate over the air programming
   OTA::initialize(deviceId);
 
   // Configure connection to home assistants
-  fauxmo.createServer(true);
+  fauxmo.createServer(false);
   fauxmo.setPort(80);
   fauxmo.addDevice(deviceId);
   fauxmo.enable(true);
 
   fauxmo.onSetState([](unsigned char device_id, const char * device_name, bool switchedOn, unsigned char value) {
-    Serial.printf(
-      "[MAIN] Device #%d (%s) state: %s value: %d\n",
-      device_id, device_name, switchedOn ? "ON" : "OFF", value
-    );
+    String statusMessage = String("[MAIN] Device ") + "device_id" + "(" + device_name + ") state: " + (switchedOn ? "ON" : "OFF") + ", value: " + value;
+    WebSerial.println(statusMessage);
+    
     maximumBrightness = value;
     writeToMemory(brightnessMemoryAddress, value);
     controlledByAssistant = switchedOn;
@@ -66,6 +89,76 @@ void setup() {
       currentState = fadingOut;
     }
   });
+
+  // WebSerial is accessible at "<IP Address>/webserial" in browser
+  WebSerial.begin(&server);
+  WebSerial.msgCallback(handleWebSerialMessage);
+  
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/plain", (String("The room brightness is ") + String(roomBrightness)).c_str());
+  });
+
+  server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    if (fauxmo.process(request->client(), request->method() == HTTP_GET, request->url(), String((char *)data))) return;
+    // Handle any other body request here...
+  });
+
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    String body = (request->hasParam("body", true)) ? request->getParam("body", true)->value() : String();
+    if (fauxmo.process(request->client(), request->method() == HTTP_GET, request->url(), body)) return;
+    request->send(404, "text/plain", "Sorry, not found. Did you mean to go to /webserial ?");
+  });
+
+  server.begin();
+}
+
+void handleWebSerialMessage(uint8_t *data, size_t len){
+// Process message into command:value pair  
+  String command = "";
+  String value   = "";
+  boolean beforeColon = true;
+  for(int i=0; i < len; i++){
+    if (char(data[i]) == ':'){
+      beforeColon = false;
+    } else if (beforeColon) {
+      command += char(data[i]);
+    } else {
+      value += char(data[i]);
+    }
+  }
+
+  if(command.equals("setBrightnessThreshold")) {
+    WebSerial.println(String("Setting brightness threshold to ") + value.toInt());
+    roomBrightnessThreshold = value.toInt();
+    writeToMemory(thresholdMemoryAddress, roomBrightnessThreshold);
+  } else
+  if(command.equals("getBrightnessThreshold")) {
+    WebSerial.println(String("Brightness threshold is ") + roomBrightnessThreshold);
+  } else 
+  if(command.equals("getBrightness")) {
+    WebSerial.println(String("Brightness is ") + roomBrightness);
+  } else 
+  if(command.equals("sleepWiFi")) {
+    WebSerial.println("Putting WiFi to sleep. To enable it again, you have to restart the device.");
+    turnOffWiFi();
+  } else
+  if(command.equals("getFalsePositives")) {
+    WebSerial.println(String("Number of false positives since the start: ") + falsePositivesCount);
+  } else
+  if(command.equals("getPreviousFalsePositives")) {
+    WebSerial.println(String("Number of false positives in the last run: ") + lastFalsePositivesCount);
+  } else
+  if(command.equals("help")) {
+    WebSerial.println("Available commands:\n");
+    WebSerial.println("getBrightnessThreshold");
+    WebSerial.println("setBrightnessThreshold:value");
+    WebSerial.println("getBrightness");
+    WebSerial.println("sleepWiFi");
+    WebSerial.println("getFalsePositives");
+    WebSerial.println("getPreviousFalsePositives");
+  } else {
+    WebSerial.println(String("Unknown command '") + command + "' with value '" + value +"'" + value);
+  }
 }
 
 void handleLightChangeEvents () {
@@ -80,6 +173,9 @@ void handleLightChangeEvents () {
       analogWrite(LED_PIN, ledStripBrightness);
       break;
     case fadingIn:
+      if(ledStripBrightness == 0) {
+        timeOfLastTrigger = millis();
+      }
       if (ledStripBrightness < maximumBrightness) {
         analogWrite(LED_PIN, ++ledStripBrightness);
       } else 
@@ -90,6 +186,13 @@ void handleLightChangeEvents () {
       }
       break;
     case fadingOut:
+      if(ledStripBrightness == maximumBrightness) {
+        float lightOnTime = (float)(millis() - timeOfLastTrigger)/1000;
+        if (lightOnTime < (float)6.32) {
+          writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
+        }
+        WebSerial.println(String("[MAIN] Sensor switched off after ") + lightOnTime + " seconds");
+      }
       if (ledStripBrightness > 0) {
         analogWrite(LED_PIN, --ledStripBrightness);
       } else {
@@ -106,10 +209,14 @@ void loop() {
   OTA::handle();
   handleLightChangeEvents();
 
-  if (digitalRead(PIR_PIN) == HIGH) {
-    int roomBrightness = analogRead(LDR_PIN);
+  // analogRead (namely the ADC) sometimes conflicts with the WiFi and Server request processing
+  // we can't use it on every loop iteration, but only sometimes
+  if(millis() % 300 == 0){
+    roomBrightness = analogRead(LDR_PIN);
+  }
 
-    digitalWrite(LED_BUILTIN, LOW);
+  if (digitalRead(PIR_PIN) == HIGH) {
+    digitalWrite(LED_BUILTIN, LOW);  
     if (!controlledByAssistant && roomBrightness < roomBrightnessThreshold && ledStripBrightness == 0) {
       currentState = fadingIn;
     }
