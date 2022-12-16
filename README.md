@@ -25,6 +25,8 @@ There are several measures I've taken to prevent this from happening:
   line, just as [this article](https://www.kevindarrah.com/wiki/index.php?title=TrigBoardMotion)
   suggests.
   ![PIR filter diagram](./images/pir_filter.png)
-- Use grounded copper tape to cover the power and signal traces to the PIR sensor
+- Use grounded copper tape to cover the power and signal traces on the PCB leading to the PIR sensor
 - Wrapped the head of the PIR sensor with the copper tape and used a piece of tube on
   the sensor head (that blocks the IR light) to block the IR noise
+
+These measures reduced the amount of false triggers to a minimum, almost zero.
