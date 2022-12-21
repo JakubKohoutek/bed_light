@@ -26,11 +26,13 @@ int            maximumBrightness        = 255;
 int            roomBrightness           = 0;
 int            roomBrightnessThreshold  = 100;
 int            timeOfLastProcessing     = millis();
-int            timeOfLastHeapCheck      = millis();
 int            timeOfLastTrigger        = millis();
+int            timeOfSensorSwitchOff    = millis();
 bool           controlledByAssistant    = false;
 int            falsePositivesCount      = 0;
 int            lastFalsePositivesCount  = 0;
+boolean        lightOn                  = false;
+int            lightOnTimeout           = 30 * 1000;
 
 void turnOffWiFi() {
   WiFi.disconnect();
@@ -113,7 +115,7 @@ void setup() {
 }
 
 void handleWebSerialMessage(uint8_t *data, size_t len){
-// Process message into command:value pair  
+  // Process message into command:value pair  
   String command = "";
   String value   = "";
   boolean beforeColon = true;
@@ -136,7 +138,7 @@ void handleWebSerialMessage(uint8_t *data, size_t len){
     WebSerial.println(String("Brightness threshold is ") + roomBrightnessThreshold);
   } else 
   if(command.equals("getBrightness")) {
-    WebSerial.println(String("Brightness is ") + roomBrightness);
+    WebSerial.println(String("Brightness is ") + readRoomBrightness());
   } else 
   if(command.equals("sleepWiFi")) {
     WebSerial.println("Putting WiFi to sleep. To enable it again, you have to restart the device.");
@@ -161,6 +163,14 @@ void handleWebSerialMessage(uint8_t *data, size_t len){
   }
 }
 
+int readRoomBrightness () {
+    // analogRead (namely the ADC) sometimes conflicts with the WiFi and Server request processing
+    // we can't use it on every loop iteration, but only sometimes, on demand!
+    roomBrightness = analogRead(LDR_PIN);
+
+    return roomBrightness;
+}
+
 void handleLightChangeEvents () {
   int currentTime = millis();
   if (currentTime - timeOfLastProcessing < 2) {
@@ -173,9 +183,6 @@ void handleLightChangeEvents () {
       analogWrite(LED_PIN, ledStripBrightness);
       break;
     case fadingIn:
-      if(ledStripBrightness == 0) {
-        timeOfLastTrigger = millis();
-      }
       if (ledStripBrightness < maximumBrightness) {
         analogWrite(LED_PIN, ++ledStripBrightness);
       } else 
@@ -186,13 +193,6 @@ void handleLightChangeEvents () {
       }
       break;
     case fadingOut:
-      if(ledStripBrightness == maximumBrightness) {
-        float lightOnTime = (float)(millis() - timeOfLastTrigger)/1000;
-        if (lightOnTime < (float)6.32) {
-          writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
-        }
-        WebSerial.println(String("[MAIN] Sensor switched off after ") + lightOnTime + " seconds");
-      }
       if (ledStripBrightness > 0) {
         analogWrite(LED_PIN, --ledStripBrightness);
       } else {
@@ -209,21 +209,35 @@ void loop() {
   OTA::handle();
   handleLightChangeEvents();
 
-  // analogRead (namely the ADC) sometimes conflicts with the WiFi and Server request processing
-  // we can't use it on every loop iteration, but only sometimes
-  if(millis() % 300 == 0){
-    roomBrightness = analogRead(LDR_PIN);
-  }
-
-  if (digitalRead(PIR_PIN) == HIGH) {
+  // Sensor changes the state from not triggered to triggered - switch on action
+  if(!lightOn && digitalRead(PIR_PIN) == HIGH) {
+    lightOn = true;
+    readRoomBrightness();
+    timeOfLastTrigger = millis();
     digitalWrite(LED_BUILTIN, LOW);  
-    if (!controlledByAssistant && roomBrightness < roomBrightnessThreshold && ledStripBrightness == 0) {
+    if (!controlledByAssistant && roomBrightness < roomBrightnessThreshold) {
       currentState = fadingIn;
     }
-  } else {
+  }
+
+  // Sensor changes the state from triggered to not triggered - switch off action
+  if(lightOn && digitalRead(PIR_PIN) == LOW) {
+    timeOfSensorSwitchOff = millis();
     digitalWrite(LED_BUILTIN, HIGH);
-    if (!controlledByAssistant) {
+    float sensorOnTime = (float)(timeOfSensorSwitchOff - timeOfLastTrigger)/1000;
+    boolean isFalseAlarm = sensorOnTime < (float)6.32;
+    if(isFalseAlarm) {
+      // turn off the light immediately if we know it's a false alarm
+      lightOn = false;
       currentState = fadingOut;
+      writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
     }
+    WebSerial.println(String("[MAIN] Sensor switched off after ") + sensorOnTime + " seconds");
+  }
+
+  // Light is on some time even after the sensor switched off, here we turn the light off eventually
+  if(lightOn && !controlledByAssistant && millis() - timeOfSensorSwitchOff > lightOnTimeout) {
+    lightOn = false;
+    currentState = fadingOut;
   }
 }
