@@ -11,6 +11,7 @@
 #define LDR_PIN A0
 
 enum State { steady, fadingIn, fadingOut };
+enum SensorState { noChange, switchingOn, switchingOff };
 
 fauxmoESP      fauxmo;
 AsyncWebServer server(80);
@@ -22,17 +23,23 @@ int            ledStripBrightness       = 0;
 int            brightnessMemoryAddress  = 0;
 int            thresholdMemoryAddress   = 4;
 int            falseAlertsMemoryAddress = 8;
+int            timeoutMemoryAddress     = 12;
+int            badAlarmThresholdAddress = 16;
 int            maximumBrightness        = 255;
 int            roomBrightness           = 0;
 int            roomBrightnessThreshold  = 100;
 int            timeOfLastProcessing     = millis();
 int            timeOfLastTrigger        = millis();
-int            timeOfSensorSwitchOff    = millis();
+int            timeOflastInterrupt      = 0;
+int            timeOfSensorSwitchOff    = 0;
 bool           controlledByAssistant    = false;
 int            falsePositivesCount      = 0;
 int            lastFalsePositivesCount  = 0;
-boolean        lightOn                  = false;
 int            lightOnTimeout           = 30 * 1000;
+boolean        isDelayedSwitchOff       = false;
+int            falseAlarmThreshold      = 6320;
+
+volatile SensorState sensorState        = noChange;
 
 void turnOffWiFi() {
     WiFi.disconnect();
@@ -44,6 +51,14 @@ void turnOnWiFi() {
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED){
         delay(500);
+    }
+}
+
+void ICACHE_RAM_ATTR handleSensorChange() {
+    if (digitalRead(PIR_PIN) == HIGH) {
+        sensorState = switchingOn;
+    } else {
+        sensorState = switchingOff;
     }
 }
 
@@ -60,11 +75,15 @@ void setup() {
     // erase memory, only on the first upload
     // writeToMemory(brightnessMemoryAddress, 0);
     // writeToMemory(thresholdMemoryAddress, roomBrightnessThreshold);
+    // writeToMemory(timeoutMemoryAddress, lightOnTimeout);
+    // writeToMemory(badAlarmThresholdAddress, falseAlarmThreshold);
 
     maximumBrightness = readFromMemory(brightnessMemoryAddress);
     roomBrightnessThreshold = readFromMemory(thresholdMemoryAddress);
     lastFalsePositivesCount = readFromMemory(falseAlertsMemoryAddress);
     writeToMemory(falseAlertsMemoryAddress, 0);
+    lightOnTimeout = readFromMemory(timeoutMemoryAddress);
+    falseAlarmThreshold = readFromMemory(badAlarmThresholdAddress);
 
     // Initiate over the air programming
     OTA::initialize(deviceId);
@@ -109,6 +128,8 @@ void setup() {
     });
 
     server.begin();
+
+    attachInterrupt(PIR_PIN, handleSensorChange, CHANGE);
 }
 
 void handleWebSerialMessage(uint8_t *data, size_t len){
@@ -147,14 +168,36 @@ void handleWebSerialMessage(uint8_t *data, size_t len){
     if(command.equals("getPreviousFalsePositives")) {
         WebSerial.println(String("Number of false positives in the last run: ") + lastFalsePositivesCount);
     } else
+    if(command.equals("getTimeout")) {
+        WebSerial.println(String("The light stays on ") + (lightOnTimeout / 1000) + " seconds afther the sensor switched off");
+    } else
+    if(command.equals("setTimeout")) {
+        lightOnTimeout = value.toInt() * 1000;
+        writeToMemory(timeoutMemoryAddress, lightOnTimeout);
+        WebSerial.println(String("Timeout set to ") + (lightOnTimeout / 1000) + " seconds");
+    } else
+    if(command.equals("getFalseAlarmThreshold")) {
+        WebSerial.println(String("The false alarm threshold is ") + falseAlarmThreshold + " milliseconds");
+    } else
+    if(command.equals("setFalseAlarmThreshold")) {
+        falseAlarmThreshold = value.toInt();
+        writeToMemory(badAlarmThresholdAddress, falseAlarmThreshold);
+        WebSerial.println(String("False alarm threshold set to ") + falseAlarmThreshold + " milliseconds");
+    } else
     if(command.equals("help")) {
-        WebSerial.println("Available commands:\n");
-        WebSerial.println("getBrightnessThreshold");
-        WebSerial.println("setBrightnessThreshold:value");
-        WebSerial.println("getBrightness");
-        WebSerial.println("sleepWiFi");
-        WebSerial.println("getFalsePositives");
-        WebSerial.println("getPreviousFalsePositives");
+        WebSerial.println((
+          String("Available commands:\n") +
+          "getBrightnessThreshold\n" +
+          "setBrightnessThreshold:value\n" +
+          "getBrightness\n" +
+          "sleepWiFi\n" +
+          "getFalsePositives\n" +
+          "getPreviousFalsePositives\n" +
+          "getTimeout\n" +
+          "setTimeout:value\n" +
+          "getFalseAlarmThreshold\n" +
+          "setFalseAlarmThreshold:value\n"
+        ).c_str());
     } else {
         WebSerial.println(String("Unknown command '") + command + "' with value '" + value +"'" + value);
     }
@@ -201,40 +244,58 @@ void handleLightChangeEvents () {
     }
 }
 
+void processInterrupt() {
+    if(sensorState == noChange) {
+        return;
+    }
+
+    // debounce the interrupt as it might trigger twice
+    if(millis() - timeOflastInterrupt < 10) {
+        sensorState = noChange;
+        return;
+    }
+    timeOflastInterrupt = millis();
+
+    switch(sensorState) {
+        case switchingOn:
+            digitalWrite(LED_BUILTIN, LOW);
+            timeOfLastTrigger = millis();
+            isDelayedSwitchOff = false;
+            readRoomBrightness();
+            if (!controlledByAssistant && roomBrightness < roomBrightnessThreshold) {
+                currentState = fadingIn;
+            }
+            WebSerial.println(String("[MAIN] Sensor switched on"));
+            break;
+
+        case switchingOff:
+            digitalWrite(LED_BUILTIN, HIGH);
+            timeOfSensorSwitchOff = millis();
+            float sensorOnTime = (float)(timeOfSensorSwitchOff - timeOfLastTrigger)/1000;
+            boolean isFalseAlarm = sensorOnTime < (float)falseAlarmThreshold / 1000;
+            WebSerial.println(String("[MAIN] Sensor switched off after ") + sensorOnTime + " seconds");
+            if(isFalseAlarm) {
+                // turn off the light immediately if we know it's a false alarm
+                // currentState = fadingOut;
+                writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
+            } else {
+                isDelayedSwitchOff = true;
+            }
+            break;
+    }
+    sensorState = noChange;
+}
+
 void loop() {
-  fauxmo.handle();
-  OTA::handle();
-  handleLightChangeEvents();
+    fauxmo.handle();
+    OTA::handle();
+    handleLightChangeEvents();
+    processInterrupt();
 
-    // Sensor changes the state from not triggered to triggered - switch on action
-    if(!lightOn && digitalRead(PIR_PIN) == HIGH) {
-        lightOn = true;
-        readRoomBrightness();
-        timeOfLastTrigger = millis();
-        digitalWrite(LED_BUILTIN, LOW);  
-        if (!controlledByAssistant && roomBrightness < roomBrightnessThreshold) {
-            currentState = fadingIn;
-        }
-    }
-
-    // Sensor changes the state from triggered to not triggered - switch off action
-    if(lightOn && digitalRead(PIR_PIN) == LOW) {
-        timeOfSensorSwitchOff = millis();
-        digitalWrite(LED_BUILTIN, HIGH);
-        float sensorOnTime = (float)(timeOfSensorSwitchOff - timeOfLastTrigger)/1000;
-        boolean isFalseAlarm = sensorOnTime < (float)6.32;
-        if(isFalseAlarm) {
-            // turn off the light immediately if we know it's a false alarm
-            lightOn = false;
-            currentState = fadingOut;
-            writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
-        }
-        WebSerial.println(String("[MAIN] Sensor switched off after ") + sensorOnTime + " seconds");
-    }
-
-    // Light is on some time even after the sensor switched off, here we turn the light off eventually
-    if(lightOn && !controlledByAssistant && millis() - timeOfSensorSwitchOff > lightOnTimeout) {
-        lightOn = false;
+    // handle delayed switch off
+    if(isDelayedSwitchOff && millis() - timeOfSensorSwitchOff > lightOnTimeout) {
+        isDelayedSwitchOff = false;
         currentState = fadingOut;
+        WebSerial.println(String("[MAIN] Light switched off after another ") + (float)((millis() - timeOfSensorSwitchOff)/1000) + " seconds");
     }
 }
