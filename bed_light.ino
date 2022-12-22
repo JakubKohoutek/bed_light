@@ -276,7 +276,7 @@ void processInterrupt() {
             WebSerial.println(String("[MAIN] Sensor switched off after ") + sensorOnTime + " seconds");
             if(isFalseAlarm) {
                 // turn off the light immediately if we know it's a false alarm
-                // currentState = fadingOut;
+                currentState = fadingOut;
                 writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
             } else {
                 isDelayedSwitchOff = true;
