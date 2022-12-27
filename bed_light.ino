@@ -11,7 +11,6 @@
 #define LDR_PIN A0
 
 enum State { steady, fadingIn, fadingOut };
-enum SensorState { noChange, switchingOn, switchingOff };
 
 fauxmoESP      fauxmo;
 AsyncWebServer server(80);
@@ -39,7 +38,7 @@ int            lightOnTimeout           = 30 * 1000;
 boolean        isDelayedSwitchOff       = false;
 int            falseAlarmThreshold      = 6320;
 
-volatile SensorState sensorState        = noChange;
+volatile boolean hasInterruptToProcess  = false;
 
 void turnOffWiFi() {
     WiFi.disconnect();
@@ -55,11 +54,7 @@ void turnOnWiFi() {
 }
 
 void ICACHE_RAM_ATTR handleSensorChange() {
-    if (digitalRead(PIR_PIN) == HIGH) {
-        sensorState = switchingOn;
-    } else {
-        sensorState = switchingOff;
-    }
+    hasInterruptToProcess = true;
 }
 
 void setup() {
@@ -245,45 +240,46 @@ void handleLightChangeEvents () {
 }
 
 void processInterrupt() {
-    if(sensorState == noChange) {
+    if(!hasInterruptToProcess) {
         return;
     }
 
     // debounce the interrupt as it might trigger twice
-    if(millis() - timeOflastInterrupt < 10) {
-        sensorState = noChange;
+    if(hasInterruptToProcess && millis() - timeOflastInterrupt < 10) {
+        hasInterruptToProcess = false;
         return;
     }
+
+    hasInterruptToProcess = false;
     timeOflastInterrupt = millis();
 
-    switch(sensorState) {
-        case switchingOn:
-            digitalWrite(LED_BUILTIN, LOW);
-            timeOfLastTrigger = millis();
-            isDelayedSwitchOff = false;
-            readRoomBrightness();
-            if (!controlledByAssistant && roomBrightness < roomBrightnessThreshold) {
-                currentState = fadingIn;
-            }
-            WebSerial.println(String("[MAIN] Sensor switched on"));
-            break;
+    // It can take upt to 4 milliseconds for the sensor to switch fully the state,
+    // therefore we wait until it happens and the sensor value is reliable
+    delay(4);
 
-        case switchingOff:
-            digitalWrite(LED_BUILTIN, HIGH);
-            timeOfSensorSwitchOff = millis();
-            float sensorOnTime = (float)(timeOfSensorSwitchOff - timeOfLastTrigger)/1000;
-            boolean isFalseAlarm = sensorOnTime < (float)falseAlarmThreshold / 1000;
-            WebSerial.println(String("[MAIN] Sensor switched off after ") + sensorOnTime + " seconds");
-            if(isFalseAlarm) {
-                // turn off the light immediately if we know it's a false alarm
-                currentState = fadingOut;
-                writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
-            } else {
-                isDelayedSwitchOff = true;
-            }
-            break;
+    if(digitalRead(PIR_PIN) == HIGH) {
+        digitalWrite(LED_BUILTIN, LOW);
+        timeOfLastTrigger = millis();
+        isDelayedSwitchOff = false;
+        readRoomBrightness();
+        if (!controlledByAssistant && roomBrightness < roomBrightnessThreshold) {
+            currentState = fadingIn;
+        }
+        WebSerial.println("[MAIN] Sensor switched on");
+    } else {
+        digitalWrite(LED_BUILTIN, HIGH);
+        timeOfSensorSwitchOff = millis();
+        float sensorOnTime = (float)(timeOfSensorSwitchOff - timeOfLastTrigger)/1000;
+        boolean isFalseAlarm = sensorOnTime < (float)falseAlarmThreshold / 1000;
+        WebSerial.println(String("[MAIN] Sensor switched off after ") + sensorOnTime + " seconds");
+        if(isFalseAlarm) {
+            // turn off the light immediately if we know it's a false alarm
+            currentState = fadingOut;
+            writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
+        } else {
+            isDelayedSwitchOff = true;
+        }
     }
-    sensorState = noChange;
 }
 
 void loop() {
