@@ -272,12 +272,14 @@ void processInterrupt() {
         float sensorOnTime = (float)(timeOfSensorSwitchOff - timeOfLastTrigger)/1000;
         boolean isFalseAlarm = sensorOnTime < (float)falseAlarmThreshold / 1000;
         WebSerial.println(String("[MAIN] Sensor switched off after ") + sensorOnTime + " seconds");
-        if(isFalseAlarm) {
-            // turn off the light immediately if we know it's a false alarm
-            currentState = fadingOut;
-            writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
-        } else {
-            isDelayedSwitchOff = true;
+        if (!controlledByAssistant) {
+            if(isFalseAlarm) {
+                // turn off the light immediately if we know it's a false alarm
+                currentState = fadingOut;
+                writeToMemory(falseAlertsMemoryAddress, ++falsePositivesCount);
+            } else {
+                isDelayedSwitchOff = true;
+            }
         }
     }
 }
